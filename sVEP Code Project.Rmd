@@ -1,0 +1,424 @@
+---
+title: "PSAP ssVEP Code Project"
+author: "Julia Farrell"
+date: "4/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Part 1: Data Pre-processing
+
+First, data was run through a set of custom scripts made by Ryan (located on the BCD lab Dropbox). For the purpose of this project, I worked on learning and summarizing each preprocessing step and how the scripts could be adapted to process other data, but for the data visualization and analysis steps, I used a set of BCA data that had already been preprocessed, located in the Dropbox (n=39).
+
+The following scripts were used to preprocess the PSAP data and create a set of BCA values.
+
+1. PSAP_dataprocessing_Conditions_BATCH.m
+  -bandpass filtered the data between 0.5- 30Hz and created bin-based epochs for each of the 8
+  trial types
+  
+2. PSAP_check_data_batch.m
+  -bad channels were identified and replaced with interpolation of the 6 nearest channels,
+  then re-referenced to the average
+  
+3. PSAP_FFT.m
+  - Fast Fourier Transform was applied to the harmonics
+  
+4. PSAP_Avgpow_files.m
+  -created grand averages for both the 6Hz standard response and the 1.2 Hz oddball response
+  
+5. PSAP_BCA.m 
+  -computed 1.2 Hz and 6 Hz BCA scores for each trial, then averaged for each trial type
+
+
+
+
+
+Part 2: Data Cleaning & Organization. For the purpose of this project, this is using a file of already pre-processed (thanks Ryan!) BCA data including n=39 subjects
+
+ 1. Download & load the necessary packages.
+```{r download the necessary packages}
+packages <- c("cowplot", "readr", "ggplot2", "dplyr", "lavaan", "smooth", "Hmisc", "tidyverse", "reshape2", "rio", "Rmisc", "purrr", "magrittr", "yarrr","tidyr", "rstatix")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))
+}
+```
+
+```{r libraries}
+library(tidyverse)
+library(dplyr)
+library(rio)
+library(reshape2)
+library(ggplot2)
+library(Rmisc)
+library(purrr)
+library(magrittr)
+library(cowplot)
+library(readr)
+library(lavaan)
+library(smooth)
+library(Hmisc)
+library(tidyr)
+library(yarrr)
+library(rstatix)
+```
+
+
+2. Find where the data is located & load the dataset.
+```{r load the data}
+setwd("~/Documents/UF/Research/PSAP ssVEP")
+#use getwd() to check whether the working directory is set to the right location
+
+PSAP_BCA<-import("~/Documents/UF/Research/PSAP ssVEP/PSAP_BCA.csv") 
+```
+
+
+3. I will need to choose only certain electrodes, instead of analyzing this entire set. The next few chunks will allow us to do that.
+
+First, transform the data from wide to long format & create a new dataframe in long format
+```{r wide to long format}
+PSAP_long<-gather(PSAP_BCA, electrode, BCA,6:134)
+```
+
+
+Then, I selected  only the necessary electrodes that will be used in my chosen ROIs. I chose these electrodes/regions based on Ryan's VSS 2018 poster using preliminary data from this study.
+```{r only pick electrodes needed}
+PSAP_ROI <-PSAP_long%>%
+  filter(electrode%in%c("X31","X51","X55","X58","X59","X64","X65","X66","X129","X69","X70", "X71","X74","X75","X76","X80","X82","X83","X84","X89","X90","X91","X95","X96","X97"))
+```
+
+
+With this new PSAP_ROI dataframe, I want to put it back into wide format
+```{r convert from long to wide}
+PSAP_ROI<-PSAP_ROI%>%
+  tidyr::spread(electrode,BCA)
+```
+
+
+4. Then, I will average electrodes within the pre-defined regions for further analysis. 
+```{r creating regions O1, O2, OZ, T5, T6, CZ by averaging electrodes}
+PSAP_ROI<-PSAP_ROI%>%
+  mutate(O1=(X65+X66+X69+X70)/4,O2=(X83+X84+X89+X90)/4,OZ=(X71+X74+X75+X76+X82)/5,
+         T5=(X51+X58+X59+X64)/4,T6=(X91+X95+X96+X97)/4, CZ=(X31+X55+X80+X129)/4)
+
+```
+
+
+I drop the individual electrodes and keep the newly defined regions only.
+```{r dropping electrodes but keeping regions only}
+PSAP_ROI<-select(PSAP_ROI,part,Race,Age,Cond,odd_base,O1,O2,OZ,T5,T6,CZ)
+
+```
+
+
+Finally, I convert it back to long format for visualization & analyses, and export to Excel for a manual check.
+```{r wide to long conversion so that we can use it for graphing and analysis}
+PSAP_ROI<-gather(PSAP_ROI,ROI,BCA,O1:CZ)
+```
+
+```{r export the data to Excel so that we can check it manually}
+write.csv(PSAP_ROI,"PSAP_ROI.csv")
+```
+
+
+
+Using this new PSAP_ROI dataset, I can choose any number of directions to go with the analyses. For the purpose of this project, I am interested specifically in the trials that involved race categorization (i.e. all faces in a trial were of the same sex and the oddball 1.2 Hz face was a different race than the standard 6Hz face)
+
+
+5. Here, I am creating a dataframe with only the 4 conditions that represent race categorization trials, thus removing the sex categorization trials
+```{r create race categorization data frame}
+race_categorization<-PSAP_ROI%>%
+  filter(Cond%in% c("WMAM","WFAF","AMWM","AFWF"))
+```
+
+
+6. Then, I want to separate the standard 6 Hz responses from the oddball 1.2 Hz responses.
+I create a separate dataframe for each frequency.
+```{r create race categorization standard response data frame}
+race_stand<-race_categorization%>%
+  filter(odd_base=="baseSUM")
+```
+
+```{r create race categorization oddball response data frame}
+race_odd<-race_categorization%>%
+  filter(odd_base=="oddSUM")
+```
+
+
+Within both the 6Hz standard and the 1.2 Hz oddball, I average across the 4 race categorization conditions
+
+```{r average across 4 race categorization conditions- standard}
+race_stand_wide<-race_stand%>%
+    tidyr::spread(Cond,BCA) #transforms to wide format
+
+race_stand_average<-race_stand_wide%>%
+  mutate(BCA=(AFWF+AMWM+WFAF+WMAM)/4) #creates an average BCA score from the 4 conditions
+
+race_stand_ROI<-select(race_stand_average, part, Race, Age, ROI, BCA) #keeps the average score but not the 4 separate conditions
+
+rm(race_stand_wide, race_stand_average) #deletes the unnecessary dataframes
+```
+
+```{r average across 4 race categorization conditions- oddball}
+race_odd_wide<-race_odd%>%
+    tidyr::spread(Cond,BCA) #transforms to wide format
+
+race_odd_average<-race_odd_wide%>%
+  mutate(BCA=(AFWF+AMWM+WFAF+WMAM)/4) #creates an average BCA score from the 4 conditions
+
+race_odd_ROI<-select(race_odd_average, part, Race, Age, ROI, BCA) #keeps the average score but not the 4 separate conditions
+
+rm(race_odd_wide, race_odd_average) #deletes the unnecessary dataframes
+```
+
+
+
+Note: Participant #124 was missing trials for WMAM and AMWM so when averaging across conditions, they had scores of NA. Here I remove that participant from further analysis in both the standard and oddball dataframes.
+```{r}
+race_stand_ROI<-na.omit(race_stand_ROI)
+race_odd_ROI<-na.omit(race_odd_ROI)
+```
+
+
+
+
+
+
+Part 3: Data Visualization: Here, I used the standard & oddball datasets that I have cleaned & organized above and create figures to visualize the data. Visualization helps to know where to focus analysis later on.
+
+I first create pirate plots for each of these sets of BCA scores, using custom colors, word sizing, labels & titles. First is the 6 Hz response.
+```{r pirate plot for standard 6 Hz BCA response}
+my.pirate.pal1<-c("#fa003f" , "#ee6123","#ffcf00", "#00916E", "#3f7cac", "#7b4b94")
+race_stand_ROI%>%
+  pirateplot(formula = BCA~ROI,
+             theme = 0,  # Start with theme 2
+             point.o = .9,   # Turn up points
+             bean.f.o = .6, # Bean fill
+             inf.f.o = .4, # Inference fill
+             inf.b.o = .8, # Inference border
+             avg.line.o = 0.8, # Average line
+             main = "6 Hz Standard BCA Response during Race Categorization",
+             pal= my.pirate.pal1,
+             inf.method='ci'
+)
+```
+This plot can show us where we should be focusing our analysis. for example here it looks like the 6Hz response was greatest the in O2 and OZ region, and least in T5, T6, and CZ.
+
+
+I do the same here for the 1.2 Hz response.
+```{r pirate plot for oddball 1.2 Hz BCA response}
+my.pirate.pal1<-c("#fa003f" , "#ee6123","#ffcf00", "#00916E", "#3f7cac", "#7b4b94")
+race_odd_ROI%>%
+  pirateplot(formula = BCA~ROI,
+             theme = 0,  # Start with theme 2
+             point.o = .9,   # Turn up points
+             bean.f.o = .6, # Bean fill
+             inf.f.o = .4, # Inference fill
+             inf.b.o = .8, # Inference border
+             avg.line.o = 0.8, # Average line
+              main = "1.2 Hz Oddball BCA response during Race Categorization",
+             pal= my.pirate.pal1,
+             inf.method='ci'
+)
+```
+Here, it looks like the 1.2 Hz responses weren't as differentiated as the 6Hz but there may be a similar pattern- stronger responses in OZ than in T5 and CZ, for example.
+
+
+Next, I wanted to try out a raincloud plot as well.
+
+
+First, I needed to run the two functions necessary for creating a raincloud plot:
+  geom_flat_violing_function.R
+  summarySEfunction.R
+  
+  
+Then, I use the following code to make an example of a raincloud plot: This plot will show the change in the 6Hz standard response to the race categorization trials in each region at different ages.
+```{r raincloud}
+race_stand_ROI$part<-as.factor(race_stand_ROI$part)
+race_stand_ROI$Age<-as.factor(race_stand_ROI$Age)
+
+sumrepdat <- summarySE(race_stand_ROI, measurevar = "BCA", # calls your data: ROT is the dataset name, "diff_BCA" is the DV that you are using
+groupvars=c("Age", "ROI")) #other variables that you want to include in your graph
+
+p1 <- ggplot(race_stand_ROI, aes(x = Age, y = BCA, fill = ROI)) + #need to change same things: dataset name (ROI), x axis, y axis (DV), and fill
+  
+  geom_flat_violin(aes(fill = ROI),position = position_nudge(x = .1, y = 0), adjust = 1.5, trim = FALSE, alpha = .5, colour = NA)+
+  geom_point(aes(x = as.numeric(Age)-.15, y = BCA, colour = ROI),position = position_jitter(width = .05), size = .25, shape = 20)+
+geom_boxplot(aes(x = Age, y = BCA, fill = ROI),outlier.shape = NA, alpha = .5, width = .1, colour = "black")+ #this section will stay mostly the same- just change the same variable names as noted previously
+  
+  geom_line(data = sumrepdat, aes(x = as.numeric(ROI)+.1, y = BCA_mean, label = ROI, colour = ROI), linetype = 3)+
+  geom_point(data = sumrepdat, aes(x = as.numeric(ROI)+.1, y = BCA_mean, label = ROI, colour = ROI), shape = 18) +
+  geom_errorbar(data = sumrepdat, aes(x = as.numeric(ROI)+.1, y = BCA_mean, label = ROI, colour = ROI, ymin = BCA_mean-se, ymax = BCA_mean+se), width = .05)+
+   #scale_fill_manual(values = my.pirate.pal1)
+#scale_colour_manual(values=my.pirate.pal1)+
+  #scale_colour_brewer(palette = "Dark2")+
+  scale_fill_brewer(palette = "Dark2")
+  #ggtitle("Figure R11: Repeated Measures - Factorial (Extended)")
+
+  #ggsave('repeatedmeasure_ROT.png', width = 7, height = 5)
+  #coord_flip()+
+p1
+
+```
+This is not the prettiest raincloud plot, but it does show some possible differences over age. We clearly did not have enough 6 year-olds to compare to the other ages, and this may not be the best way to visualize this data in particular. I wanted to use this as an example for creating a raincloud plot that can be edited in the future.
+
+
+
+
+
+
+
+Part 3: Data analysis
+
+For analysis purposes, I am also interested in looking to see if there are any differences between race categorization in male face and in female faces. So I will first create new datasets here that average together WMAM & AMWM conditions as race categorization within male faces, and average WFAF and AFWF conditions together as categorization within female faces.
+
+```{r average across 4 race categorization conditions- standard}
+race_stand_wide<-race_stand%>%
+    tidyr::spread(Cond,BCA) #transforms to wide format
+
+race_stand_sex<-race_stand_wide%>%
+ mutate(Male=(AMWM+WMAM)/2, Female=(AFWF+WFAF)/2) #averages two male conditions together & two female conditions together
+
+race_stand_sex<-select(race_stand_sex, part, Race, Age, ROI, Male, Female) #keeps the average score but not the 4 separate conditions
+
+race_stand_sex<-gather(race_stand_sex, Sex, BCA, Male:Female)
+
+rm(race_stand_wide) #deletes the unnecessary dataframe
+```
+
+```{r average across 4 race categorization conditions- standard}
+race_odd_wide<-race_odd%>%
+    tidyr::spread(Cond,BCA) #transforms to wide format
+
+race_odd_sex<-race_odd_wide%>%
+ mutate(Male=(AMWM+WMAM)/2, Female=(AFWF+WFAF)/2) #averages two male conditions together & two female conditions together
+
+race_odd_sex<-select(race_odd_sex, part, Race, Age, ROI, Male, Female) #keeps the average score but not the 4 separate conditions
+
+race_odd_sex<-gather(race_odd_sex, Sex, BCA, Male:Female)
+
+rm(race_odd_wide) #deletes the unnecessary dataframe
+```
+
+Same as before, I have to remove the missing (NA) values (participant 124)
+```{r}
+race_stand_sex<-na.omit(race_stand_sex)
+race_odd_sex<-na.omit(race_odd_sex)
+```
+
+
+
+
+
+Finally, I want to run a repeated measures ANOVA
+
+First, I am focusing on the standard 6Hz responses. I first change all variables to factors.
+
+```{r convert to factors}
+race_stand_sex$part<-as.factor(race_stand_sex$part)
+race_stand_sex$Race<-as.factor(race_stand_sex$Race)
+race_stand_sex$Age<-as.factor(race_stand_sex$Age)
+race_stand_sex$ROI<-as.factor(race_stand_sex$ROI)
+race_stand_sex$Sex<-as.factor(race_stand_sex$Sex)
+```
+
+
+I then run the repeated measures ANOVA with the DV of 6Hz BCA, and the within subject IVs being ROI, sex and participant age.
+```{r repeated measures ANOVA}
+res.aov<-anova_test(data=race_stand_sex,
+                    formula= BCA ~ ROI*Age*Sex + Error(part/(ROI+Sex)),
+                    dv=BCA,
+                    wid=part,
+                    within=ROI, Sex
+                    ) #creates new variable, running anova_test, where you define the dataset, DV, wid(participant ID), and the within subjects variables (here: label, ROI, age)
+get_anova_table(res.aov) #shows you the stats with an anova table
+```
+There is a significant main effect of ROI and a significant interaction of Age and Sex on the 6Hz  response.
+
+
+I follow up the ROI main effect with a t-test to check where the differences lie.
+```{r}
+t_test(
+  data=race_stand_sex,
+  formula= BCA ~ ROI,
+  p.adjust.method = "bonferroni"
+  
+)
+```
+Based on what I can tell, this table does not give asterisks to tell what is significant, but using visual inspection of the Bonferroni-adjusted p-value, it looks like all of the ROIs are significantly different from one another with the exceptions of: O1 & T6, O2 & OZ, and T5 & T6. 
+
+
+I then follow up the two way interaction between age and sex.
+```{r follow up the two way interaction}
+two.way<-race_stand_sex%>%
+  group_by(Sex)%>%     
+  anova_test(dv=BCA, wid=part, between=Age)
+two.way
+get_anova_table(two.way)
+```
+This shows that there are significant differences in how children process the female race categorization trials at different ages, but no difference for male faces. This would need to be followed up again differently to see what the differences are between ages for female faces.
+
+
+I follow up this interaction again, switching the Age and Sex variables to check for differences at different ages.
+```{r follow up the two way interaction}
+two.way<-race_stand_sex%>%
+  group_by(Age)%>%     
+  anova_test(dv=BCA, wid=part, between=Sex)
+two.way
+get_anova_table(two.way)
+```
+This shows that the only age where there were significant differences between male and female race categorization trials was at 4 years.
+
+
+
+
+Then I repeat the same steps from above but using the oddball 1.2 Hz dataset.
+```{r convert to factors}
+race_odd_sex$part<-as.factor(race_odd_sex$part)
+race_odd_sex$Race<-as.factor(race_odd_sex$Race)
+race_odd_sex$Age<-as.factor(race_odd_sex$Age)
+race_odd_sex$ROI<-as.factor(race_odd_sex$ROI)
+race_odd_sex$Sex<-as.factor(race_odd_sex$Sex)
+```
+
+
+```{r repeated measures ANOVA}
+res.aov<-anova_test(data=race_odd_sex,
+                    formula= BCA ~ ROI*Age*Sex + Error(part/(ROI+Sex)),
+                    dv=BCA,
+                    wid=part,
+                    within=ROI, Sex
+                    ) #creates new variable, running anova_test, where you define the dataset, DV, wid(participant ID), and the within subjects variables (here: label, ROI, age)
+get_anova_table(res.aov) #shows you the stats with an anova table
+```
+No significant effects on the 1.2 Hz BCA.
+
+
+Follow up t-test to test for differences in region for the 1.2 Hz response (just for fun, even though nothing was significant in the ANOVA)
+```{r}
+t_test(
+  data=race_odd_ROI,
+  formula= BCA ~ ROI,
+  p.adjust.method = "bonferroni"
+  
+)
+```
+As expected, none of the adjusted p-values between any regions are >.05, so there were no significant differences between region for the oddball response.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
